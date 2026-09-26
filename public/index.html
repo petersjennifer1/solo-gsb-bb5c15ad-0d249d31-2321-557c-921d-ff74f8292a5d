@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>字幕校订台 · 纪录片剪辑</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>字幕校订台</h1>
+    <p class="sub">上传旧版 SRT 与逐行修订台词，自动全局对齐（支持一拆二、二并一），人工复核后导出成品 SRT。</p>
+  </header>
+
+  <main>
+    <!-- 第一步：上传 -->
+    <section id="step-upload" class="card">
+      <h2><span class="step-no">1</span> 上传素材</h2>
+      <div class="upload-grid">
+        <div class="upload-box">
+          <label class="file-label">
+            旧版字幕（.srt，带时码）
+            <input type="file" id="srtFile" accept=".srt,.txt">
+          </label>
+          <textarea id="srtText" rows="8" placeholder="也可以直接粘贴 SRT 内容…" spellcheck="false"></textarea>
+        </div>
+        <div class="upload-box">
+          <label class="file-label">
+            修订台词（.txt，每行一句）
+            <input type="file" id="revFile" accept=".txt,.text,.md">
+          </label>
+          <textarea id="revText" rows="8" placeholder="也可以直接粘贴修订台词，每行一句…" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="alignBtn" class="primary">开始对齐</button>
+        <span id="alignMsg" class="msg"></span>
+      </div>
+    </section>
+
+    <!-- 第二步：校订 -->
+    <section id="step-review" class="card hidden">
+      <h2><span class="step-no">2</span> 校订配对与时码</h2>
+      <div id="statsBar" class="stats"></div>
+      <div class="toolbar">
+        <label><input type="checkbox" id="pendingOnly"> 仅看待处理行</label>
+        <span class="hint">提示：可修改台词文本与时码；勾选某行「锁定」后匀时时保持其时码不变；「拆分」把一行拆成两行并按长度分配时段；「合并」与下一行并成一条并沿用覆盖时段；带标记的行确认无误后点「确认」。</span>
+      </div>
+      <div class="evenize-bar">
+        <button id="evenizeBtn" class="primary">区间匀时</button>
+        <span class="hint">对每段连续未锁定行，以前一锁定行结束、后一锁定行开始为界（缺锁定邻居时沿用该段原首/末时码），按可见字数分配时长：单行 ≥ 400ms、行间 ≥ 100ms，锁定行不动。</span>
+        <div id="evenizeMsg" class="msg hidden"></div>
+      </div>
+      <div class="table-wrap">
+        <table id="rowsTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th class="lock-col">锁定</th>
+              <th>修订台词（导出文本）</th>
+              <th>对应旧字幕</th>
+              <th>相似度</th>
+              <th>开始</th>
+              <th>结束</th>
+              <th>标记</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="rowsBody"></tbody>
+        </table>
+      </div>
+      <details id="droppedBox" class="dropped hidden">
+        <summary>被丢弃的旧字幕（修订稿中已删除）</summary>
+        <ul id="droppedList"></ul>
+      </details>
+      <div class="actions">
+        <button id="exportBtn" class="primary">确认并预览</button>
+        <span id="exportMsg" class="msg"></span>
+      </div>
+    </section>
+
+    <!-- 第三步：预览与下载 -->
+    <section id="step-preview" class="card hidden">
+      <h2><span class="step-no">3</span> 预览与下载</h2>
+      <div id="previewWarn" class="warn hidden"></div>
+      <pre id="previewBox" class="preview"></pre>
+      <div class="actions">
+        <button id="downloadBtn" class="primary">下载 SRT</button>
+        <button id="backBtn">返回继续修改</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>本地运行 · 数据不出本机</footer>
+  <script src="app.js"></script>
+</body>
+</html>

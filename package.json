@@ -1,0 +1,17 @@
+{
+  "name": "subtitle-revision-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "纪录片剪辑用本地字幕校订工具：旧 SRT 与逐行修订台词全局对齐，支持拆分/合并，人工复核后导出 SRT",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
