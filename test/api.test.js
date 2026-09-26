@@ -82,3 +82,62 @@ test('POST /api/evenize: 参数校验', async () => {
   assert.equal(bad.status, 400);
   assert.match(bad.json.error, /第 1 行/);
 });
+
+test('POST /api/avoid-cuts: 跨越切点的未锁定行被避让，锁定行不动', async () => {
+  const { status, json } = await callApi('/api/avoid-cuts', {
+    cutsText: '00:00:01,500\n00:00:02,500',
+    rows: [
+      { start: 0, end: 1000, locked: true },
+      { start: 1050, end: 2000 }, // 跨 1500，受锁定行牵制只能切点后开始
+      { start: 2100, end: 3000 }, // 跨 2500，B（start=2500，代价 400）优于 A（代价 500）
+    ],
+  });
+  assert.equal(status, 200);
+  assert.deepEqual(json.cuts, [1500, 2500]);
+  assert.deepEqual([json.rows[0].start, json.rows[0].end], [0, 1000]);
+  assert.deepEqual([json.rows[1].start, json.rows[1].end], [1500, 2000]);
+  assert.deepEqual([json.rows[2].start, json.rows[2].end], [2500, 3000]);
+  assert.deepEqual(json.adjusted, [2, 3]);
+  assert.deepEqual(json.failures, []);
+});
+
+test('POST /api/avoid-cuts: 无可行方案的行保留原时码并报告行号与原因', async () => {
+  const { status, json } = await callApi('/api/avoid-cuts', {
+    cutsText: '00:00:01,200',
+    rows: [
+      { start: 0, end: 1000, locked: true },
+      { start: 1050, end: 1300 },
+      { start: 1650, end: 2000, locked: true },
+    ],
+  });
+  assert.equal(status, 200);
+  assert.deepEqual(json.adjusted, []);
+  assert.equal(json.failures.length, 1);
+  assert.deepEqual(json.failures[0].rows, [2]);
+  assert.match(json.failures[0].reason, /第 2 行|锁定行/);
+  assert.deepEqual([json.rows[1].start, json.rows[1].end], [1050, 1300]); // 原时码不动
+});
+
+test('POST /api/avoid-cuts: 切点格式错误指出输入行号且不改动字幕', async () => {
+  const { status, json } = await callApi('/api/avoid-cuts', {
+    cutsText: '00:00:02,500\n不是时码',
+    rows: [{ start: 1000, end: 3000 }],
+  });
+  assert.equal(status, 400);
+  assert.equal(json.line, 2);
+  assert.match(json.error, /第 2 行/);
+  assert.ok(!json.rows); // 不返回任何改动
+});
+
+test('POST /api/avoid-cuts: 参数校验', async () => {
+  const noRows = await callApi('/api/avoid-cuts', { rows: [], cutsText: '00:00:01,000' });
+  assert.equal(noRows.status, 400);
+  const noCuts = await callApi('/api/avoid-cuts', { rows: [{ start: 0, end: 1000 }], cutsText: '  ' });
+  assert.equal(noCuts.status, 400);
+  const reversed = await callApi('/api/avoid-cuts', {
+    rows: [{ start: 3000, end: 2000 }],
+    cutsText: '00:00:02,500',
+  });
+  assert.equal(reversed.status, 400);
+  assert.match(reversed.json.error, /第 1 行/);
+});

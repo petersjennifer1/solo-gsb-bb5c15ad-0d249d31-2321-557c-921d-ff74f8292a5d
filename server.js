@@ -5,6 +5,7 @@ const express = require('express');
 const { parseSrt, serializeSrt } = require('./src/srt');
 const { alignRevised } = require('./src/align');
 const { evenize } = require('./src/evenize');
+const { parseCutPoints, avoidCuts, CutParseError } = require('./src/cutpoints');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -105,6 +106,53 @@ app.post('/api/evenize', (req, res) => {
       rows: work.map((r) => ({ start: r.start, end: r.end, locked: r.locked })),
       updated: report.updated,
       updatedRows: report.updatedRows,
+      failures: report.failures,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * 镜头切点避切：cutsText 每行一个 HH:MM:SS,mmm。
+ * 对跨越切点的未锁定行，联合选择总时码改动最小的「切点前结束 / 切点后开始」组合；
+ * 锁定行不动；无可行方案的行保留原时码并上报行号与原因。
+ * 切点格式错误返回 400 并指出输入行号，不改动任何字幕。
+ */
+app.post('/api/avoid-cuts', (req, res) => {
+  try {
+    const { rows, cutsText } = req.body || {};
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ error: '没有可处理的行' });
+    }
+    if (typeof cutsText !== 'string' || !cutsText.trim()) {
+      return res.status(400).json({ error: '缺少镜头切点：请每行输入一个 HH:MM:SS,mmm' });
+    }
+    let cuts;
+    try {
+      cuts = parseCutPoints(cutsText);
+    } catch (err) {
+      if (err instanceof CutParseError) {
+        return res.status(400).json({ error: err.message, line: err.line });
+      }
+      throw err;
+    }
+    if (!cuts.length) {
+      return res.status(400).json({ error: '未解析出任何切点：请每行输入一个 HH:MM:SS,mmm' });
+    }
+    const work = rows.map((r, idx) => {
+      const start = Number(r.start);
+      const end = Number(r.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0) {
+        throw new Error(`第 ${idx + 1} 行时码无效`);
+      }
+      return { start: Math.round(start), end: Math.round(end), locked: !!r.locked };
+    });
+    const report = avoidCuts(work, cuts);
+    res.json({
+      cuts,
+      rows: work.map((r) => ({ start: r.start, end: r.end, locked: r.locked })),
+      adjusted: report.adjusted,
       failures: report.failures,
     });
   } catch (err) {

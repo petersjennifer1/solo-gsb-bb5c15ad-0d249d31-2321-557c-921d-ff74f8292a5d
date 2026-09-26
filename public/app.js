@@ -1,10 +1,11 @@
 'use strict';
 
 /* 全局状态：rows 为当前校订结果，结构：
- * { id, text, start, end, sim, oldRefs:[{index,text}], baseFlags:[], ack, locked, evenizeFail }
+ * { id, text, start, end, sim, oldRefs:[{index,text}], baseFlags:[], ack, locked, evenizeFail, cutFail }
  * baseFlags 来自服务端（uncertain / unmatched），ack 后清除；
- * reversed / overlap 每次渲染前实时重算；
- * locked 为行内时码锁定开关（匀时时保持不动）；evenizeFail 标记最近一次匀时容量不足的区间。
+ * reversed / overlap / crosses 每次渲染前实时重算（crosses 依据 state.cuts 镜头切点）；
+ * locked 为行内时码锁定开关（匀时/避切点时保持不动）；
+ * evenizeFail 标记最近一次匀时容量不足的区间；cutFail 标记最近一次避切点无可行方案的行。
  */
 const state = {
   rows: [],
@@ -12,6 +13,7 @@ const state = {
   nextId: 1,
   pendingOnly: false,
   lastSrt: '',
+  cuts: [], // 镜头切点（毫秒），避切点成功后由服务端返回
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -21,6 +23,7 @@ const FLAG_LABELS = {
   unmatched: '未匹配',
   reversed: '倒序',
   overlap: '重叠',
+  crosses: '跨切点',
 };
 
 /* ---------- 时码工具 ---------- */
@@ -50,6 +53,14 @@ function computeFlags(rows) {
     const flags = new Set(r.baseFlags);
     if (r.start != null && r.end != null && r.end <= r.start) flags.add('reversed');
     if (k > 0 && r.start != null && rows[k - 1].end != null && r.start < rows[k - 1].end) flags.add('overlap');
+    if (state.cuts.length && r.start != null && r.end != null && r.end > r.start) {
+      for (const c of state.cuts) {
+        if (r.start < c && c < r.end) {
+          flags.add('crosses');
+          break;
+        }
+      }
+    }
     r.flags = [...flags];
   });
 }
@@ -96,9 +107,11 @@ $('#alignBtn').addEventListener('click', async () => {
       ack: false,
       locked: false,
       evenizeFail: false,
+      cutFail: false,
     }));
     state.droppedOld = data.droppedOld || [];
     $('#evenizeMsg').classList.add('hidden');
+    $('#cutMsg').classList.add('hidden');
     renderStats(data.stats);
     renderDropped();
     renderRows();
@@ -178,6 +191,7 @@ function buildRow(row, idx) {
   if (row.ack) tr.classList.add('acked');
   if (row.locked) tr.classList.add('locked');
   if (row.evenizeFail) tr.classList.add('evenize-fail');
+  if (row.cutFail) tr.classList.add('cut-fail');
 
   // #
   const tdNo = document.createElement('td');
@@ -194,6 +208,7 @@ function buildRow(row, idx) {
   lockCb.addEventListener('change', () => {
     row.locked = lockCb.checked;
     row.evenizeFail = false;
+    row.cutFail = false;
     renderRows();
   });
   tdLock.appendChild(lockCb);
@@ -206,7 +221,7 @@ function buildRow(row, idx) {
   ta.rows = Math.min(3, Math.max(1, row.text.split('\n').length));
   ta.value = row.text;
   ta.spellcheck = false;
-  ta.addEventListener('input', () => { row.text = ta.value; row.evenizeFail = false; });
+  ta.addEventListener('input', () => { row.text = ta.value; row.evenizeFail = false; row.cutFail = false; });
   tdText.appendChild(ta);
   tr.appendChild(tdText);
 
@@ -253,6 +268,7 @@ function buildRow(row, idx) {
       input.classList.remove('invalid');
       row[field] = v;
       row.evenizeFail = false;
+      row.cutFail = false;
       input.value = formatMs(v);
       renderRows();
     });
@@ -381,6 +397,7 @@ function doSplit(row, pos) {
     ack: row.ack,
     locked: false,
     evenizeFail: false,
+    cutFail: false,
   });
   state.rows.splice(idx, 1, mk(t1, s1, e1), mk(t2, s2, e2));
   renderRows();
@@ -407,6 +424,7 @@ function mergeWithNext(row) {
     ack: row.ack && next.ack,
     locked: !!(row.locked && next.locked),
     evenizeFail: false,
+    cutFail: false,
   };
   state.rows.splice(idx, 2, merged);
   renderRows();
@@ -423,8 +441,7 @@ function formatDur(ms) {
   return `${ms} 毫秒`;
 }
 
-function showEvenizeMsg(parts, kind) {
-  const box = $('#evenizeMsg');
+function showMsgParts(box, parts, kind) {
   box.classList.remove('hidden', 'ok', 'warn');
   box.classList.add(kind);
   box.innerHTML = '';
@@ -437,6 +454,14 @@ function showEvenizeMsg(parts, kind) {
     }
     box.appendChild(div);
   }
+}
+
+function showEvenizeMsg(parts, kind) {
+  showMsgParts($('#evenizeMsg'), parts, kind);
+}
+
+function showCutMsg(parts, kind) {
+  showMsgParts($('#cutMsg'), parts, kind);
 }
 
 function clearEvenizeMsg() {
@@ -473,6 +498,7 @@ $('#evenizeBtn').addEventListener('click', async () => {
         r.end = out.end;
       }
       r.evenizeFail = false;
+      r.cutFail = false; // 时码已变，旧的避切点失败结论失效
     });
     for (const f of data.failures) {
       for (let i = f.from - 1; i <= f.to - 1; i++) {
@@ -502,6 +528,68 @@ $('#evenizeBtn').addEventListener('click', async () => {
     }
   } catch (err) {
     showEvenizeMsg([err.message], 'warn');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+/* ---------- 镜头切点避切 ---------- */
+
+$('#avoidCutsBtn').addEventListener('click', async () => {
+  const btn = $('#avoidCutsBtn');
+  if (!state.rows.length) return;
+  const cutsText = $('#cutText').value;
+  if (!cutsText.trim()) {
+    showCutMsg(['请先输入镜头切点：每行一个，格式 HH:MM:SS,mmm。'], 'warn');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/avoid-cuts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cutsText,
+        rows: state.rows.map((r) => ({ start: r.start, end: r.end, locked: r.locked })),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '避切点失败'); // 格式错误时 error 含输入行号
+
+    state.cuts = data.cuts || [];
+    state.rows.forEach((r, i) => {
+      const out = data.rows[i];
+      if (out && !r.locked) {
+        r.start = out.start;
+        r.end = out.end;
+      }
+      r.evenizeFail = false; // 时码已变，旧的匀时失败结论失效
+      r.cutFail = false;
+    });
+    for (const f of data.failures) {
+      for (const n of f.rows) {
+        if (state.rows[n - 1]) state.rows[n - 1].cutFail = true;
+      }
+    }
+
+    const parts = [];
+    if (data.adjusted.length) {
+      parts.push(`已避让 ${data.adjusted.length} 行（总时码改动最小）：${data.adjusted.map((n) => '#' + n).join('、')}。`);
+    } else if (!data.failures.length) {
+      parts.push('没有跨越切点的未锁定行需要调整。');
+    }
+    for (const f of data.failures) {
+      parts.push(`第 ${f.rows.map((n) => '#' + n).join('、')} 行保留原时码：${f.reason}`);
+    }
+    computeFlags(state.rows);
+    const still = state.rows.map((r, i) => (r.flags.includes('crosses') ? i + 1 : 0)).filter(Boolean);
+    if (still.length) {
+      parts.push(`仍跨越切点：${still.map((n) => '#' + n).join('、')}（锁定行或无可行方案行，预览时会再次提示）。`);
+    }
+    showCutMsg(parts, data.failures.length ? 'warn' : 'ok');
+    renderRows();
+  } catch (err) {
+    showCutMsg([err.message], 'warn');
   } finally {
     btn.disabled = false;
   }
@@ -543,9 +631,25 @@ $('#exportBtn').addEventListener('click', async () => {
     state.lastSrt = await res.text();
     $('#previewBox').textContent = state.lastSrt;
     const warnBox = $('#previewWarn');
+    const warns = [];
     if (pendingRows.length) {
+      warns.push(`注意：导出内容包含 ${pendingRows.length} 行曾标记为待处理的字幕，请确认已人工复核。`);
+    }
+    computeFlags(state.rows);
+    const crossRows = state.rows.map((r, i) => (r.flags.includes('crosses') ? i + 1 : 0)).filter(Boolean);
+    if (crossRows.length) {
+      warns.push(
+        `仍有 ${crossRows.length} 行跨越镜头切点：${crossRows.slice(0, 10).map((n) => '#' + n).join('、')}${crossRows.length > 10 ? '…' : ''}。可返回校订页调整或解除锁定后重新「避切点」。`
+      );
+    }
+    if (warns.length) {
       warnBox.classList.remove('hidden');
-      warnBox.textContent = `注意：导出内容包含 ${pendingRows.length} 行曾标记为待处理的字幕，请确认已人工复核。`;
+      warnBox.innerHTML = '';
+      for (const w of warns) {
+        const div = document.createElement('div');
+        div.textContent = w;
+        warnBox.appendChild(div);
+      }
     } else {
       warnBox.classList.add('hidden');
     }
