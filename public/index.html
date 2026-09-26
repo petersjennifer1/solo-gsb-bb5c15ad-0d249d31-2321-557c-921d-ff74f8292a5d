@@ -51,6 +51,15 @@
         <span class="hint">对每段连续未锁定行，以前一锁定行结束、后一锁定行开始为界（缺锁定邻居时沿用该段原首/末时码），按可见字数分配时长：单行 ≥ 400ms、行间 ≥ 100ms，锁定行不动。</span>
         <div id="evenizeMsg" class="msg hidden"></div>
       </div>
+      <div class="cut-bar">
+        <label class="cut-label" for="cutText">镜头切点（每行一个，格式 <code>HH:MM:SS,mmm</code>）</label>
+        <textarea id="cutText" rows="4" spellcheck="false" placeholder="00:00:05,000&#10;00:01:12,500&#10;00:03:40,000"></textarea>
+        <div class="cut-actions">
+          <button id="avoidCutBtn" class="primary">避切点</button>
+          <span class="hint">对跨越切点的未锁定行，在切点前结束或从切点后开始（缩短不足 400ms 时整行平移）；受相邻行牵制时联合选择总时码改动最小的方案：每行 ≥ 400ms、相邻间隔 ≥ 100ms，锁定行不动。</span>
+        </div>
+        <div id="cutMsg" class="msg hidden"></div>
+      </div>
       <div class="table-wrap">
         <table id="rowsTable">
           <thead>

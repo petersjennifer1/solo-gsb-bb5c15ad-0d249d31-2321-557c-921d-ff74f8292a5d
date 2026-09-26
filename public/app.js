@@ -1,10 +1,12 @@
 'use strict';
 
 /* 全局状态：rows 为当前校订结果，结构：
- * { id, text, start, end, sim, oldRefs:[{index,text}], baseFlags:[], ack, locked, evenizeFail }
+ * { id, text, start, end, sim, oldRefs:[{index,text}], baseFlags:[], ack, locked, evenizeFail, cutFail }
  * baseFlags 来自服务端（uncertain / unmatched），ack 后清除；
  * reversed / overlap 每次渲染前实时重算；
- * locked 为行内时码锁定开关（匀时时保持不动）；evenizeFail 标记最近一次匀时容量不足的区间。
+ * locked 为行内时码锁定开关（匀时/避切点时保持不动）；
+ * evenizeFail 标记最近一次匀时容量不足的区间；cutFail 标记最近一次避切点无可行方案的行；
+ * cuts 为最近一次成功解析的镜头切点（毫秒，升序去重），跨切点徽标按其实时重算。
  */
 const state = {
   rows: [],
@@ -12,6 +14,7 @@ const state = {
   nextId: 1,
   pendingOnly: false,
   lastSrt: '',
+  cuts: [],
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -21,6 +24,7 @@ const FLAG_LABELS = {
   unmatched: '未匹配',
   reversed: '倒序',
   overlap: '重叠',
+  crosscut: '跨切点',
 };
 
 /* ---------- 时码工具 ---------- */
@@ -43,6 +47,40 @@ function parseTimecode(str) {
   return h * 3600000 + Number(m[2]) * 60000 + Number(m[3]) * 1000 + Number(m[4].padEnd(3, '0').slice(0, 3));
 }
 
+/* ---------- 镜头切点 ---------- */
+
+/** 切点严格格式 HH:MM:SS,mmm（逗号，时可 2~3 位，分/秒 00–59）。 */
+const CUT_RE = /^(\d{2,3}):([0-5]\d):([0-5]\d),(\d{3})$/;
+
+function parseCut(str) {
+  const m = String(str).trim().match(CUT_RE);
+  if (!m) return null;
+  return Number(m[1]) * 3600000 + Number(m[2]) * 60000 + Number(m[3]) * 1000 + Number(m[4]);
+}
+
+/**
+ * 解析切点输入框内容（每行一个）。
+ * @returns {{cuts?:number[], error?:{line:number,text:string}}}
+ *   空行跳过；任意非空行格式错误时返回首个错误的物理行号（1 起）且不返回 cuts。
+ */
+function parseCutInput(text) {
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+  const cuts = [];
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (!raw.trim()) continue;
+    const v = parseCut(raw);
+    if (v == null) return { error: { line: i + 1, text: raw.trim() } };
+    cuts.push(v);
+  }
+  return { cuts };
+}
+
+/** 行是否（严格）跨越任一切点；切点恰在端点不算。 */
+function rowSpansCut(row) {
+  return state.cuts.some((c) => c > row.start && c < row.end);
+}
+
 /* ---------- 行级计算（与服务端规则一致） ---------- */
 
 function computeFlags(rows) {
@@ -50,8 +88,15 @@ function computeFlags(rows) {
     const flags = new Set(r.baseFlags);
     if (r.start != null && r.end != null && r.end <= r.start) flags.add('reversed');
     if (k > 0 && r.start != null && rows[k - 1].end != null && r.start < rows[k - 1].end) flags.add('overlap');
+    // crosscut 只作提示徽标，不计入「待处理」（锁定行也可能跨切点）
+    if (r.start != null && r.end != null && rowSpansCut(r)) flags.add('crosscut');
     r.flags = [...flags];
   });
+}
+
+/** 待处理行：不含纯提示类的 crosscut。 */
+function isPending(row) {
+  return row.flags.some((f) => f !== 'crosscut');
 }
 
 function splitRangeByLength(start, end, t1, t2) {
@@ -96,9 +141,14 @@ $('#alignBtn').addEventListener('click', async () => {
       ack: false,
       locked: false,
       evenizeFail: false,
+      cutFail: false,
     }));
     state.droppedOld = data.droppedOld || [];
     $('#evenizeMsg').classList.add('hidden');
+    clearCutMsg();
+    // 重新对齐后沿用切点输入框内容：能解析则继续按其提示跨切点行，否则等用户修正输入
+    const reparsed = parseCutInput($('#cutText').value);
+    state.cuts = reparsed.cuts && reparsed.cuts.length ? reparsed.cuts : [];
     renderStats(data.stats);
     renderDropped();
     renderRows();
@@ -129,7 +179,7 @@ function renderStats(s) {
 
 function refreshStatsPending() {
   computeFlags(state.rows);
-  const pending = state.rows.filter((r) => r.flags.length > 0).length;
+  const pending = state.rows.filter(isPending).length;
   const ok = state.rows.length - pending;
   const stats = $('#statsBar').children;
   if (stats.length >= 7) {
@@ -157,7 +207,7 @@ function renderDropped() {
 
 function rowMatchesFilter(row) {
   if (!state.pendingOnly) return true;
-  return row.flags.length > 0;
+  return isPending(row);
 }
 
 function renderRows() {
@@ -178,6 +228,7 @@ function buildRow(row, idx) {
   if (row.ack) tr.classList.add('acked');
   if (row.locked) tr.classList.add('locked');
   if (row.evenizeFail) tr.classList.add('evenize-fail');
+  if (row.cutFail) tr.classList.add('cut-fail');
 
   // #
   const tdNo = document.createElement('td');
@@ -194,6 +245,7 @@ function buildRow(row, idx) {
   lockCb.addEventListener('change', () => {
     row.locked = lockCb.checked;
     row.evenizeFail = false;
+    row.cutFail = false;
     renderRows();
   });
   tdLock.appendChild(lockCb);
@@ -206,7 +258,7 @@ function buildRow(row, idx) {
   ta.rows = Math.min(3, Math.max(1, row.text.split('\n').length));
   ta.value = row.text;
   ta.spellcheck = false;
-  ta.addEventListener('input', () => { row.text = ta.value; row.evenizeFail = false; });
+  ta.addEventListener('input', () => { row.text = ta.value; row.evenizeFail = false; row.cutFail = false; });
   tdText.appendChild(ta);
   tr.appendChild(tdText);
 
@@ -253,6 +305,7 @@ function buildRow(row, idx) {
       input.classList.remove('invalid');
       row[field] = v;
       row.evenizeFail = false;
+      row.cutFail = false;
       input.value = formatMs(v);
       renderRows();
     });
@@ -381,6 +434,7 @@ function doSplit(row, pos) {
     ack: row.ack,
     locked: false,
     evenizeFail: false,
+    cutFail: false,
   });
   state.rows.splice(idx, 1, mk(t1, s1, e1), mk(t2, s2, e2));
   renderRows();
@@ -407,6 +461,7 @@ function mergeWithNext(row) {
     ack: row.ack && next.ack,
     locked: !!(row.locked && next.locked),
     evenizeFail: false,
+    cutFail: false,
   };
   state.rows.splice(idx, 2, merged);
   renderRows();
@@ -473,6 +528,7 @@ $('#evenizeBtn').addEventListener('click', async () => {
         r.end = out.end;
       }
       r.evenizeFail = false;
+      r.cutFail = false;
     });
     for (const f of data.failures) {
       for (let i = f.from - 1; i <= f.to - 1; i++) {
@@ -507,6 +563,135 @@ $('#evenizeBtn').addEventListener('click', async () => {
   }
 });
 
+/* ---------- 避切点 ---------- */
+
+function showCutMsg(parts, kind) {
+  const box = $('#cutMsg');
+  box.classList.remove('hidden', 'ok', 'warn');
+  box.classList.add(kind);
+  box.innerHTML = '';
+  for (const p of parts) {
+    const div = document.createElement('div');
+    if (p instanceof Node) {
+      div.appendChild(p);
+    } else {
+      div.textContent = p;
+    }
+    box.appendChild(div);
+  }
+}
+
+function clearCutMsg() {
+  const box = $('#cutMsg');
+  box.className = 'msg hidden';
+  box.innerHTML = '';
+}
+
+$('#cutText').addEventListener('input', () => {
+  $('#cutText').classList.remove('invalid');
+  clearCutMsg();
+});
+
+$('#avoidCutBtn').addEventListener('click', async () => {
+  const btn = $('#avoidCutBtn');
+  const cutInput = $('#cutText');
+  cutInput.classList.remove('invalid');
+  if (!state.rows.length) return;
+
+  const parsed = parseCutInput(cutInput.value);
+  if (parsed.error) {
+    // 格式错误：不改动任何字幕，也不清空上一次成功应用的切点标记
+    cutInput.classList.add('invalid');
+    showCutMsg(
+      [
+        `切点格式错误（第 ${parsed.error.line} 行：“${parsed.error.text}”）。`,
+        '每行一个切点，格式须为 HH:MM:SS,mmm（24 时制，逗号分隔毫秒，如 00:01:02,500）。未改动任何字幕。',
+      ],
+      'warn'
+    );
+    renderRows();
+    return;
+  }
+  const cuts = [...new Set(parsed.cuts)].sort((a, b) => a - b);
+  state.cuts = cuts;
+  if (!cuts.length) {
+    showCutMsg(['没有检测到切点：请在上方每行输入一个切点（HH:MM:SS,mmm）。'], 'warn');
+    renderRows();
+    return;
+  }
+
+  computeFlags(state.rows);
+  const spanning = state.rows
+    .map((r, i) => ({ r, i: i + 1 }))
+    .filter(({ r }) => r.flags.includes('crosscut'));
+  const spanningLocked = spanning.filter(({ r }) => r.locked).map(({ i }) => i);
+  const workTargets = spanning.filter(({ r }) => !r.locked);
+  if (!workTargets.length) {
+    const parts = spanningLocked.length
+      ? [`共 ${cuts.length} 个切点；跨切点的行均已锁定，未锁定行无需调整。`]
+      : [`共 ${cuts.length} 个切点，没有字幕跨越切点，无需调整。`];
+    if (spanningLocked.length) {
+      parts.push(`锁定行 ${spanningLocked.map((i) => `#${i}`).join('、')} 仍跨越切点（锁定行时码不变）。`);
+    }
+    showCutMsg(parts, spanningLocked.length ? 'warn' : 'ok');
+    renderRows();
+    return;
+  }
+
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/avoidcuts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rows: state.rows.map((r) => ({ start: r.start, end: r.end, text: r.text, locked: r.locked })),
+        cuts,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '避切点失败');
+
+    state.rows.forEach((r, i) => {
+      const out = data.rows[i];
+      if (out && !r.locked) {
+        r.start = out.start;
+        r.end = out.end;
+      }
+      r.cutFail = false;
+    });
+    for (const f of data.failures) {
+      if (state.rows[f.line - 1]) state.rows[f.line - 1].cutFail = true;
+    }
+
+    const parts = [];
+    if (data.updated > 0) {
+      parts.push(`已调整 ${data.updated} 行：在切点前结束或从切点后开始（缩短不足 400ms 时整行平移），单行 ≥ 400ms、相邻间隔 ≥ 100ms。`);
+    } else {
+      parts.push('没有可调整的行。');
+    }
+    for (const f of data.failures) {
+      const div = document.createElement('div');
+      const b = document.createElement('b');
+      b.textContent = `第 ${f.line} 行：`;
+      div.append(b, document.createTextNode(f.reason));
+      parts.push(div);
+    }
+    if (data.spanning.length) {
+      parts.push(`调整后仍跨越切点的行：${data.spanning.map((i) => `#${i}`).join('、')}（见行内「跨切点」标记）。`);
+    }
+    const kind = data.failures.length || data.spanning.length ? 'warn' : 'ok';
+    showCutMsg(parts, kind);
+    renderRows();
+    if (data.failures.length) {
+      $('#rowsBody').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  } catch (err) {
+    showCutMsg([err.message], 'warn');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* ---------- 导出 / 预览 / 下载 ---------- */
 
 $('#pendingOnly').addEventListener('change', (e) => {
@@ -520,7 +705,10 @@ $('#exportBtn').addEventListener('click', async () => {
   computeFlags(state.rows);
   const pendingRows = state.rows
     .map((r, i) => ({ r, i: i + 1 }))
-    .filter(({ r }) => r.flags.length > 0);
+    .filter(({ r }) => isPending(r));
+  const crossRows = state.rows
+    .map((r, i) => ({ r, i: i + 1 }))
+    .filter(({ r }) => r.flags.includes('crosscut'));
   if (pendingRows.length) {
     const list = pendingRows.slice(0, 8).map(({ i }) => `#${i}`).join('、');
     if (!window.confirm(`仍有 ${pendingRows.length} 行待处理（${list}${pendingRows.length > 8 ? '…' : ''}），确定继续导出？`)) {
@@ -543,11 +731,20 @@ $('#exportBtn').addEventListener('click', async () => {
     state.lastSrt = await res.text();
     $('#previewBox').textContent = state.lastSrt;
     const warnBox = $('#previewWarn');
+    const warns = [];
     if (pendingRows.length) {
+      warns.push(`注意：导出内容包含 ${pendingRows.length} 行曾标记为待处理的字幕，请确认已人工复核。`);
+    }
+    if (crossRows.length) {
+      const list = crossRows.map(({ i }) => `#${i}`).join('、');
+      warns.push(`仍有 ${crossRows.length} 行跨越镜头切点（${list}），沿用校订后的当前时码导出，请确认。`);
+    }
+    if (warns.length) {
       warnBox.classList.remove('hidden');
-      warnBox.textContent = `注意：导出内容包含 ${pendingRows.length} 行曾标记为待处理的字幕，请确认已人工复核。`;
+      warnBox.innerHTML = warns.map((w) => `<div>${w}</div>`).join('');
     } else {
       warnBox.classList.add('hidden');
+      warnBox.innerHTML = '';
     }
     $('#step-preview').classList.remove('hidden');
     msg.className = 'msg ok';

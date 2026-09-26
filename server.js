@@ -5,6 +5,7 @@ const express = require('express');
 const { parseSrt, serializeSrt } = require('./src/srt');
 const { alignRevised } = require('./src/align');
 const { evenize } = require('./src/evenize');
+const { avoidCuts } = require('./src/avoidcuts');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 8080;
@@ -106,6 +107,50 @@ app.post('/api/evenize', (req, res) => {
       updated: report.updated,
       updatedRows: report.updatedRows,
       failures: report.failures,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * 避切点：对跨越镜头切点的未锁定行，在「切点前结束 / 切点后开始 / 整行平移」中
+ * 联合选择总时码改动最小的方案；锁定行不动，无可行方案的行保留原时码并给出原因。
+ * 入参 rows（同 /api/evenize）+ cuts（毫秒数组），返回更新后的时码、失败行与仍跨切点的行。
+ */
+app.post('/api/avoidcuts', (req, res) => {
+  try {
+    const { rows, cuts } = req.body || {};
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ error: '没有可处理的行' });
+    }
+    if (!Array.isArray(cuts) || !cuts.length) {
+      return res.status(400).json({ error: '没有切点：请先输入镜头切点' });
+    }
+    const work = rows.map((r, idx) => {
+      const start = Number(r.start);
+      const end = Number(r.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0) {
+        throw new Error(`第 ${idx + 1} 行时码无效`);
+      }
+      return {
+        start: Math.round(start),
+        end: Math.round(end),
+        text: String(r.text == null ? '' : r.text),
+        locked: !!r.locked,
+      };
+    });
+    const cutList = cuts.map((c) => {
+      const v = Number(c);
+      if (!Number.isFinite(v) || v < 0) throw new Error('切点时码无效');
+      return Math.round(v);
+    });
+    const report = avoidCuts(work, cutList);
+    res.json({
+      rows: work.map((r) => ({ start: r.start, end: r.end, locked: r.locked })),
+      updated: report.updated,
+      failures: report.failures,
+      spanning: report.spanning,
     });
   } catch (err) {
     res.status(400).json({ error: err.message });

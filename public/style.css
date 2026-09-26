@@ -104,6 +104,7 @@ tr.pending td { background: rgba(224, 161, 62, 0.07); }
 tr.acked td { background: rgba(63, 178, 127, 0.05); }
 tr.locked td { background: rgba(79, 140, 255, 0.07); }
 tr.evenize-fail td { background: rgba(224, 94, 94, 0.10); }
+tr.cut-fail td { background: rgba(224, 94, 94, 0.13); }
 .lock-col { text-align: center; white-space: nowrap; }
 
 td .line-text {
@@ -148,6 +149,27 @@ td .line-text:hover, td .line-text:focus { border-color: var(--border); backgrou
 .msg.warn { color: var(--warn); }
 .msg.bad { color: var(--bad); }
 
+.cut-bar {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: #12141a;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.cut-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.cut-label code {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 12px;
+}
+#cutText { height: auto; min-height: 72px; resize: vertical; }
+#cutText.invalid { border-color: var(--bad); }
+.cut-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.cut-actions .hint { color: var(--muted); font-size: 12px; flex: 1 1 320px; }
+.cut-bar .msg { margin-top: 8px; }
+
 .oldref { color: var(--muted); font-size: 12px; max-width: 220px; }
 .oldref .nums { color: var(--accent); white-space: nowrap; }
 .oldref.none { color: var(--bad); }
@@ -167,6 +189,7 @@ td .line-text:hover, td .line-text:focus { border-color: var(--border); backgrou
 .badge.unmatched { background: rgba(224,94,94,.18); color: var(--bad); }
 .badge.reversed  { background: rgba(224,94,94,.18); color: var(--bad); }
 .badge.overlap   { background: rgba(224,94,94,.18); color: var(--bad); }
+.badge.crosscut  { background: rgba(155,110,230,.20); color: #b79af0; }
 
 .split-editor td { background: #12141a; }
 .split-editor input[type="number"] {
